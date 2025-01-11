@@ -11,7 +11,6 @@ from astropy.units import Quantity
 from astropy.wcs import WCS
 from astropy_healpix import HEALPix
 
-
 @dataclass(init=True, repr=True)
 class FaradaySky:
     filename: str = None
@@ -22,7 +21,6 @@ class FaradaySky:
     hp: HEALPix = field(init=False, default=None)
 
     def __post_init__(self):
-
         if self.nside is None:
             self.nside = 512
 
@@ -36,27 +34,23 @@ class FaradaySky:
 
         self.extension = pathlib.Path(self.filename).suffix
         if self.extension == ".hdf5":
-            hf = h5py.File(self.filename, "r")
-            self.data = (
-                np.array(hf.get("faraday_sky_mean")),
-                np.array(hf.get("faraday_sky_std")),
-            )
-            hf.close()
+            with h5py.File(self.filename, "r") as hf:
+                self.data = (
+                    np.array(hf.get("faraday_sky_mean")),
+                    np.array(hf.get("faraday_sky_std")),
+                )
         elif self.extension == ".fits":
             with fits.open(self.filename) as hdul:
                 self.data = (
                     hdul[1].data["faraday_sky_mean"],
                     hdul[1].data["faraday_sky_std"],
                 )
-                if "ORDERING" in hdul[0].header:
-                    self.ordering = hdul[0].header["ORDERING"]
-
-                if "NSIDE" in hdul[0].header:
-                    self.nside = hdul[0].header["ORDERING"]
+                self.ordering = hdul[0].header.get("ORDERING", self.ordering)
+                self.nside = hdul[0].header.get("NSIDE", self.nside)
         else:
             raise ValueError("The extension is not HDF5 or FITS")
 
-        if self.nside is not None and self.ordering is not None:
+        if self.nside and self.ordering:
             self.hp = HEALPix(nside=self.nside, order=self.ordering, frame=Galactic())
 
     def galactic_rm(
@@ -66,19 +60,7 @@ class FaradaySky:
         frame="icrs",
         use_bilinear_interpolation: bool = False,
     ):
-        if isinstance(ra, Quantity):
-            ra = ra.to(un.rad)
-        elif isinstance(ra, str):
-            ra = Quantity(ra)
-        else:
-            raise TypeError("Not valid type")
-
-        if isinstance(dec, Quantity):
-            dec = dec.to(un.rad)
-        elif isinstance(ra, str):
-            dec = Quantity(dec)
-        else:
-            raise TypeError("Not valid type")
+        ra, dec = self._validate_coordinates(ra, dec)
 
         coord = SkyCoord(ra=ra, dec=dec, frame=frame)
 
@@ -101,23 +83,13 @@ class FaradaySky:
         fitsfile: Union[str, fits.HDUList, fits.PrimaryHDU, fits.Header] = None,
         use_bilinear_interpolation: bool = False,
     ):
-        if isinstance(fitsfile, str):
-            hdul = fits.open(fitsfile)[0]
-            header = hdul.header
-        elif isinstance(fitsfile, fits.HDUList):
-            header = fitsfile[0].header
-        elif isinstance(fitsfile, fits.PrimaryHDU):
-            header = fitsfile.header
-        else:
-            header = fitsfile
-
+        header = self._extract_header(fitsfile)
         w = WCS(header, naxis=2)
 
-        m = header["NAXIS1"]
-        n = header["NAXIS2"]
+        m, n = header["NAXIS1"], header["NAXIS2"]
         frame = header["RADESYS"].lower()
-        x = np.arange(0, m, 1)
-        y = np.arange(0, n, 1)
+
+        x, y = np.arange(m), np.arange(n)
         xx, yy = np.meshgrid(x, y)
 
         skycoord = w.array_index_to_world(xx, yy)
@@ -131,11 +103,34 @@ class FaradaySky:
         rm_mean = rm_flattened[0].reshape(n, m)
         rm_std = rm_flattened[1].reshape(n, m)
 
-        rm_mean_field = np.mean(rm_mean)
-        rm_uncertainty_field = np.mean(rm_std)
         print(
-            "The Galactic RM in the field is {0:.2f} \u00B1 {1:.2f}".format(
-                rm_mean_field.value, rm_uncertainty_field
-            )
+            f"The Galactic RM in the field is {rm_mean.mean():.2f} ± {rm_std.mean():.2f}"
         )
         return rm_mean, rm_std
+
+    def _validate_coordinates(self, ra, dec):
+        if isinstance(ra, Quantity):
+            ra = ra.to(un.rad)
+        elif isinstance(ra, str):
+            ra = Quantity(ra)
+        else:
+            raise TypeError("Not valid type for RA")
+
+        if isinstance(dec, Quantity):
+            dec = dec.to(un.rad)
+        elif isinstance(dec, str):
+            dec = Quantity(dec)
+        else:
+            raise TypeError("Not valid type for DEC")
+
+        return ra, dec
+
+    def _extract_header(self, fitsfile):
+        if isinstance(fitsfile, str):
+            return fits.getheader(fitsfile)
+        elif isinstance(fitsfile, (fits.HDUList, fits.PrimaryHDU)):
+            return fitsfile[0].header
+        elif isinstance(fitsfile, fits.Header):
+            return fitsfile
+        else:
+            raise TypeError("Invalid FITS file type")
